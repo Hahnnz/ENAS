@@ -14,6 +14,7 @@ class Controller():
                  keep_prob=1., # dropout ratio
                  tanh_constant=None,
                  entropy_weight=None,
+                 op_tanh_reduce = 1., 
                  seed=None,
                  name='Controller'):
         
@@ -25,6 +26,7 @@ class Controller():
         self.num_branch = num_branch # number of hyperparameter you want
         self.keep_prob = keep_prob # dropout ratio
         self.entropy_weight = entropy_weight # entropy weight of reward entropy
+        self.op_tanh_reduce = op_tanh_reduce # 
         self.name = name
         
         # Global controller train step
@@ -220,15 +222,21 @@ class Controller():
         vars_to_train = [var for var in tf.trainable_variables() if var.name.startswith(self.name)]
         
         
-        raise NotImplementedError("WIP")
+        self.train_op, self.lr, self.grad_norm, self.optimizer = set_optimizer(
+            self.loss,
+            vars_to_train,
+            clip_mode=self.clip_mode,
+            grad_bound=self.grad_bound,
+            l2_reg=self.l2_reg,
+            lr_init=self.lr_init,
+            lr_dec_start=self.lr_dec_start,
+            lr_dec_every=self.lr_dec_every,
+            lr_dec_rate=self.lr_dec_rate,
+            optim_algo=self.optim_algo,
+            sync_replicas=self.sync_replicas,
+            num_aggregate=self.num_aggregate,
+            num_replicas=self.num_replicas
+        )
         
-    def (self,):
-        raise NotImplementedError("WIP")
-        
-    def (self,):
-        raise NotImplementedError("WIP")
-        
-    def (self,):
-        raise NotImplementedError("WIP")
-        
-        
+        # Skip rate?
+        self.skip_rate = tf.constant(0., dtype=tf.float32)
