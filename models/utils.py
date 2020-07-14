@@ -1,6 +1,32 @@
 import tensorflow as tf
 import numpy as np
 
+class config_lr_options:
+    def __init__(self,
+                 warmup_val=None,
+                 warmup_steps=1e3,
+                 decay_start=0,
+                 decay_every=1e4,
+                 decay_rate=1e-1,
+                 decay_min=None,
+                 lr_cosine=False,
+                 max_lr=None,
+                 min_lr=None,
+                 T_0=None,
+                 T_mul=None,):
+        self.lr_warmup_val=warmup_val
+        self.lr_warmup_steps=warmup_steps
+        self.lr_dec_start=decay_start
+        self.lr_dec_every=decay_every
+        self.lr_dec_rate=decay_rate
+        self.lr_dec_min=decay_min
+        self.lr_cosine=lr_cosine
+        self.lr_max=max_lr
+        self.lr_min=min_lr
+        self.lr_T_0=T_0
+        self.lr_T_mul=T_mul
+
+
 def set_optimizer(
     loss_op,
     vars2train,
@@ -23,6 +49,8 @@ def set_optimizer(
     lr_min=None,
     lr_T_0=None,
     lr_T_mul=None,
+    # take learning rate above options without giving them except 'lr_init'
+    lr_options=None,
     num_train_batches=None,
     optimizer_type="adam",
     # ????
@@ -31,6 +59,20 @@ def set_optimizer(
     num_replicas=None,
     get_grad_norms=False,
     moving_average=None):
+    
+    # take learning Rate options from configuration class
+    if lr_options is not None :
+        lr_warmup_val = lr_options.lr_warmup_val
+        lr_warmup_steps = lr_options.lr_warmup_steps
+        lr_dec_start = lr_options.lr_dec_start
+        lr_dec_every = lr_options.lr_dec_every
+        lr_dec_rate = lr_options.lr_dec_rate
+        lr_dec_min = lr_options.lr_dec_min
+        lr_cosine = lr_options.lr_cosine
+        lr_max = lr_options.lr_max
+        lr_min = lr_options.lr_min
+        lr_T_0 = lr_options.lr_T_0
+        lr_T_mul = lr_options.lr_T_mul 
     
     # l2 regularization
     if l2_reg > 0 :
