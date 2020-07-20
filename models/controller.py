@@ -12,11 +12,22 @@ class Controller():
                  num_layers=2, # Number of Recurrent unit layer
                  unit_dim=32, # number of channel of recurrent unit
                  keep_prob=1., # dropout ratio
-                 tanh_constant=None,
-                 entropy_weight=None,
-                 op_tanh_reduce = 1., 
-                 seed=None,
+                 num_branch=5, # Number of operation (size of search space for operator)
+                 tanh_constant=None, # constant of Logits clipping for input idx.
+                 entropy_weight=None, # use entropy as reward if not None.
+                 op_tanh_reduce = 1., # constant of Logits clipping for op idx .
+                 seed=None, # set random seed of total controller functions
                  name='Controller'):
+        '''
+        Description :
+            Create Micro Controller
+            
+        Attribute Functions :
+            [F] __init_controller
+            [F] __create_idx_sampler
+            [F] __create_op_sampler
+            [F] __create_trainer
+        '''
         
         self.batch_size = batch_size
         self.optimizer_type = otype # optimizer type
@@ -26,19 +37,29 @@ class Controller():
         self.num_branch = num_branch # number of hyperparameter you want
         self.keep_prob = keep_prob # dropout ratio
         self.entropy_weight = entropy_weight # entropy weight of reward entropy
-        self.op_tanh_reduce = op_tanh_reduce # 
-        self.name = name
+        self.op_tanh_reduce = op_tanh_reduce # softmax
+        self.name = name # Contoller names
         
         # Global controller train step
         self.train_step = tf.Variable(0, dtype=tf.int32, trainable=False, name="train_step")
+        
         # initialize Controller Recurrent unit weights
-        __init_controller()
-        
-        
-        
-        raise NotImplementedError("WIP")
+        self.__init_controller()
+        arc_seq_1, entropy_1, log_prob_1, c, h = self.__create_idx_sampler(use_bias=True)
+        arc_seq_2, entropy_2, log_prob_2, _, _ = self.__create_idx_sampler(prev_c=c, prev_h=h)
+        self.sample_arc = (arc_seq_1, arc_seq_2)
+        self.sample_entropy = entropy_1 + entropy_2
+        self.sample_log_prob = log_prob_1 + log_prob_2
         
     def __init_controller(self):
+        '''
+        Description :
+            initialize necessary weights of controller
+        Argument :
+            - None
+        Output : 
+            - None
+        '''
         with tf.variable_scope(self.name):
             
             # create recurrent unit layer with initializing 
@@ -49,53 +70,75 @@ class Controller():
                     w = tf.get_variable('weights', [2*self.unit_dims , __num_w_mat*self.unit_dims])
                     self.w_recurrent.append(w)
             
-            # create generator embeddings for each branch
+            # create generator embeddings for each branch.
             self.embedding = tf.get_variable('generator_embeddings', [1, self.unit_dim])
             with tf.variable_scope('embedding'):
                 self.w_emb = tf.get_variable('weights', [self.num_branch, self.unit_dim])
             
-            # Softmax
+            # Softmax weights
             with tf.variable_scope('softmax'):
                 self.w_sotf  = tf.get_variable('weights', [self.unit_dim, self.num_branches])
                 
                 b_init = np.array([10.0, 10.0] + [0] * (self.num_branches - 2), dtype=np.float32)
                 self.b_soft = tf.get_variable('bias', [1, self.num_branches], initializer=tf.constant_initializer(b_init))
                 
+                # for the case if you dont use softmax weight
                 b_soft_no_learn = np.array([0.25, 0.25] + [-0.25] * (self.num_branches - 2), dtype=np.float32)
                 b_soft_no_learn = np.reshape(b_soft_no_learn, [1, self.num_branches])
                 self.b_soft_no_learn = tf.constant(b_soft_no_learn, dtype=tf.float32)
                 
+            # For query which index op or input to use.
             with tf.variable_scope('attention'):
-                self.w_attn_1 = tf.get_variable("weight_1", [self.lstm_size, self.lstm_size])
-                self.w_attn_2 = tf.get_variable("weight_2", [self.lstm_size, self.lstm_size])
-                self.v_attn = tf.get_variable("value", [self.lstm_size, 1])
+                # thie attention matrix is for make enhance value of lstm output vector
+                self.w_attn_1 = tf.get_variable("weight_1", [self.lstm_size, self.lstm_size]) # for sampler
+                self.w_attn_2 = tf.get_variable("weight_2", [self.lstm_size, self.lstm_size]) # for child_layer_idx
+                self.v_attn = tf.get_variable("value", [self.lstm_size, 1]) # thie make what index of input or operator will be
     
-    def __create_sampler(self, prev_c=None, prev_h=None, use_bias=False):
+    def __create_idx_sampler(self, prev_c=None, prev_h=None, use_bias=False):
+        '''
+        Description :
+            create index sampler.
+        Argument :
+            - prev_h (default = None) [required : tensor vecotr, 2D] : 
+                hidden states vector of previous RNN units.
+            - prev_c (default = None) [required : tensor vector, 2D] : 
+                cell states vector of previous RNN units.
+            - use_bias (default = False) [required : Boolean]:
+        Output : 
+            - None
+        '''
         # create anchor
         anchors = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
         anchors_w1 = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
+        
         # model decision sequence
         arc_seq = tf.TensorArray(tf.int32, size=self.num_cells * 4)
         
         if prev_c is None :
             assert prev_h is None, "prev_c and prev_h must both be None or given"
-            
+            # Why is 'num_layers' given 2? need 2 check! 
             prev_c = [tf.zeros([1,self.unit_dim], tf.float32) for _ in range(self.num_layers)]
             prev_h = [tf.zeros([1,self.unit_dim], tf.float32) for _ in range(self.num_layers)]
         
+        # initialize Generator embedding vectors
         inputs = self.g_emb
         for layers_id in range(2):
             next_c, next_h = rnn_layer(inputs, prev_c, prev_h, self.w_recurrent)
             prev_c, prev_h = next_c, next_h
             
+            # Skip connection? 
             anchors = anchors.write(layer_id, tf.zeros_like(next_h[-1]))
             anchors_w1 = anchors_w1.write(layer_id, tf.matmul(next_h[-1], self.w_attn_1))
         
-    def __create_layer_controller(self, layer_id, data, prev_c, prev_h, anchor, anchor_w1, arc_seq, entorpy, log_prob):
-        def condition(layer_id, *args):
-            return tf.less(layer_id, self.num_cells + 2)
+    def __create_op_sampler(self, layer_id, data, prev_c, prev_h, anchor, anchor_w1, arc_seq, entorpy, log_prob):
+        child_layer_id = layer
+        # child ,contr
+        # 레이어 갯수 조건문 많으면 스탑 
+        def condition(child_layer_id, *args):
+            return tf.less(child_layer_id, self.num_cells + 2)
+        
         indices = tf.range(0,layer_id, dtype=tf.int32)
-        start_id = 4*(layer_id-2)
+        start_id = 4*(layer_id-2) # RNN cell ID
         
         prev_layers = []
         
@@ -113,11 +156,20 @@ class Controller():
             query = tf.matmul(query, self.v_attn) # WHY Attention? [IDK]
             logits = tf.reshape(query, [1, layer_id])
             
-            # 역할 모르겠음.
+            # Softmax temperature :
+            # NEURAL COMBINATORIAL OPTIMIZATION WITH REINFORCEMENT LEARNING 
+            # https://arxiv.org/pdf/1611.09940.pdf
+            # 
+            # temperature is hyperparameter set to T = 1 during training. When T > 1, the distribution
+            # represented by A(ref, q) becomes less steep, hence preventing the model from being overconfident.
             if self.temperature is not None : 
                 logits /= self.temperature
             
-            # hypublic tangent????
+            # Logit clipping:
+            # NEURAL COMBINATORIAL OPTIMIZATION WITH REINFORCEMENT LEARNING 
+            # https://arxiv.org/pdf/1611.09940.pdf
+            # 
+            # tanh_constant is a hyperparameter that controls the range of the logits and hence the entropy of A(ref, q).
             if self.tanh_constant is not None : 
                 logits = self.tanh_constant * tf.tanh(logits)
                 
@@ -127,7 +179,7 @@ class Controller():
             index = tf.reshape(index, [1])
             
             # write selected model hyperparameter
-            arc_seq = arc_seg.write(start_id+2 * i, index)
+            arc_seq = arc_seq.write(start_id+2 * i, index)
             
             # a layer block controller loss
             curr_log_prob = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=index)
@@ -145,7 +197,7 @@ class Controller():
         # 이건 뭘까.. Operation 1, 2 를 정의하는 부분같긴한데.. 정확히 무엇을 정의하는지 모르겠음.
         # Softmax RNN Controller - for loop 1
         for i in range(2):
-            next_c, next_h = rnn_layer(data, prev_c, prev_h, self.w_recurrent)
+            next_c, next_h = rnn_layer(inputs, prev_c, prev_h, self.w_recurrent)
             next_c, next_h = prev_c, prev_h
         
             logits = tf.matmul(next_h[-1], self.w_soft)
@@ -188,8 +240,8 @@ class Controller():
         entropy = tf.reduce_sum(loop_outputs[-2])
         log_prob = tf.reduce_sum(loop_outputs[-1])
         
-        last_c = loop_outputs[-7]
-        last_h = loop_outputs[-6]
+        last_c = loop_outputs[-7] # loop_vars[-7] is prev_c
+        last_h = loop_outputs[-6] # loop_vars[-6] is prev_h
         
         return arc_seq, entropy, log_prob, last_c, last_b
         
