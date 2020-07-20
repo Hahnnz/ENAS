@@ -43,10 +43,19 @@ class Controller():
         # Global controller train step
         self.train_step = tf.Variable(0, dtype=tf.int32, trainable=False, name="train_step")
         
+        # create anchor
+        self.anchors = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
+        self.anchors_w1 = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
+        
+        # child model decision sequence
+        self.arc_seq = tf.TensorArray(tf.int32, size=self.num_cells * 4)
+        
         # initialize Controller Recurrent unit weights
         self.__init_controller()
-        arc_seq_1, entropy_1, log_prob_1, c, h = self.__create_idx_sampler(use_bias=True)
-        arc_seq_2, entropy_2, log_prob_2, _, _ = self.__create_idx_sampler(prev_c=c, prev_h=h)
+        # Normal Cells
+        arc_seq_1, entropy_1, log_prob_1, c, h = self.__create_controller_body(use_bias=True)
+        # Reduce Cells
+        arc_seq_2, entropy_2, log_prob_2, _, _ = self.__create_controller_body(prev_c=c, prev_h=h)
         self.sample_arc = (arc_seq_1, arc_seq_2)
         self.sample_entropy = entropy_1 + entropy_2
         self.sample_log_prob = log_prob_1 + log_prob_2
@@ -71,9 +80,9 @@ class Controller():
                     self.w_recurrent.append(w)
             
             # create generator embeddings for each branch.
-            self.embedding = tf.get_variable('generator_embeddings', [1, self.unit_dim])
-            with tf.variable_scope('embedding'):
-                self.w_emb = tf.get_variable('weights', [self.num_branch, self.unit_dim])
+            self.start_vector = tf.get_variable('start_vector', [1, self.unit_dim])
+            with tf.variable_scope('search_space_embedding'):
+                self.branch_vector = tf.get_variable('branch_vector', [self.num_branch, self.unit_dim])
             
             # Softmax weights
             with tf.variable_scope('softmax'):
@@ -94,55 +103,108 @@ class Controller():
                 self.w_attn_2 = tf.get_variable("weight_2", [self.lstm_size, self.lstm_size]) # for child_layer_idx
                 self.v_attn = tf.get_variable("value", [self.lstm_size, 1]) # thie make what index of input or operator will be
     
-    def __create_idx_sampler(self, prev_c=None, prev_h=None, use_bias=False):
+    def __create_controller_body(self, prev_c=None, prev_h=None, use_bias=False):
+        '''
+        Description : 
+        Arguments : 
+        Outputs :
+        '''
+        
+        def check_length(layer_id, *args):
+            '''
+            Description :
+                check current layer_id. True if layer_id is over then number of child network layer else False.
+            Arguments :
+                - layer_id [required : tensor integer]: 
+                    current child layer (node) id
+            Outputs (Boolean):
+                True : if current layer id **over** than given number of layers.
+                False : if current layer id **less** than given number of layers.
+            '''
+            return tf.less(layer_id, self.num_cells + 2)
+        
+        self.__use_bias=use_bias
+        # create first skip connection
+        prev_c, prev_h = self.__create_anchor_sampler(gen_anchor=2)
+        inputs = self.start_vector
+        
+        def pipeline(layer_id, inputs, prev_c, prev_h, entropy, log_prob):
+            # node inputs
+            inputs, prev_c, prev_h, entorpy, log_prob = self.__create_input_sampler(layer_id, inputs, prev_c, prev_h, entorpy, log_prob)
+            # node operations
+            inputs, prev_c, prev_h, entorpy, log_prob = self.__create_op_sampler(layer_id, inputs, prev_c, prev_h, entorpy, log_prob)
+            # node anchor
+            prev_c, prev_h = self.__create_anchor_sampler(prev_c=prev_c, prev_h=prev_h, use_bias=self.__use_bias)
+            # initialize input as start vector
+            inputs = self.start_vector
+            
+            return layer_id+1, inputs, prev_c, prev_h, entropy, log_prob, 
+        
+        # loop variables the 
+        loop_vars = [
+            tf.constant(2, dtype=tf.int32, name='layer_id'), # 0 and 1 are stem layers.
+            inputs, prev_c, prev_h,
+            # entorpy and log_prob will be appended.
+            tf.constant([0.,], dtype=tf.float32, name='entropy'),
+            tf.constant([0.,], dtype=tf.float32, name='log_prob'),
+        ]
+        
+        # Controller rnn cells until layer id reach the number of cells.
+        loop_outputs = tf.while_loop(check_length, pipeline, loop_vars, parallel_iterations=1)
+        
+        arc_srq = arc_srq[-3].stack()
+        arc_srq = tf.reshape(arc_srq, [-1]) # make 1D tensor array
+        entropy = tf.reduce_sum(loop_outputs[-2])
+        log_prob = tf.reduce_sum(loop_outputs[-1])
+        
+        last_c = loop_outputs[-6] # loop_vars[-7] is 'prev_c'
+        last_h = loop_outputs[-5] # loop_vars[-6] is 'prev_h'
+        
+        return self.arc_seq, entropy, log_prob, last_c, last_b
+    
+    def __create_anchor_sampler(self, inputs=None, gen_anchor=1, prev_c=None, prev_h=None, use_bias=False):
         '''
         Description :
-            create index sampler.
+            create sampler for skip connection, anchor.
         Argument :
             - prev_h (default = None) [required : tensor vecotr, 2D] : 
                 hidden states vector of previous RNN units.
             - prev_c (default = None) [required : tensor vector, 2D] : 
                 cell states vector of previous RNN units.
             - use_bias (default = False) [required : Boolean]:
+                allow to add bias
+            - gen_anchor (default = 1) [required : integer]:
+                the times you want to generate anchor idx.
         Output : 
             - None
         '''
-        # create anchor
-        anchors = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
-        anchors_w1 = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
-        
-        # model decision sequence
-        arc_seq = tf.TensorArray(tf.int32, size=self.num_cells * 4)
         
         if prev_c is None :
             assert prev_h is None, "prev_c and prev_h must both be None or given"
-            # Why is 'num_layers' given 2? need 2 check! 
+            # for first input of rnn unit. c and h will be zero-vector as same with rnn unit_dim
             prev_c = [tf.zeros([1,self.unit_dim], tf.float32) for _ in range(self.num_layers)]
             prev_h = [tf.zeros([1,self.unit_dim], tf.float32) for _ in range(self.num_layers)]
         
-        # initialize Generator embedding vectors
-        inputs = self.g_emb
-        for layers_id in range(2):
+        if inputs is None :
+            # initialize Generator embedding vectors
+            inputs = self.start_vector
+            
+        for layers_id in range(gen_anchor):
             next_c, next_h = rnn_layer(inputs, prev_c, prev_h, self.w_recurrent)
             prev_c, prev_h = next_c, next_h
             
-            # Skip connection? 
-            anchors = anchors.write(layer_id, tf.zeros_like(next_h[-1]))
-            anchors_w1 = anchors_w1.write(layer_id, tf.matmul(next_h[-1], self.w_attn_1))
+            self.anchors = self.anchors.write(layer_id, tf.zeros_like(next_h[-1]))
+            self.anchors_w1 = self.anchors_w1.write(layer_id, tf.matmul(next_h[-1], self.w_attn_1))
         
-    def __create_op_sampler(self, layer_id, data, prev_c, prev_h, anchor, anchor_w1, arc_seq, entorpy, log_prob):
-        child_layer_id = layer
-        # child ,contr
-        # 레이어 갯수 조건문 많으면 스탑 
-        def condition(child_layer_id, *args):
-            return tf.less(child_layer_id, self.num_cells + 2)
-        
+        return prev_c, prev_h
+            
+    def __create_input_sampler(self, layer_id, data, prev_c, prev_h, entorpy, log_prob)
         indices = tf.range(0,layer_id, dtype=tf.int32)
         start_id = 4*(layer_id-2) # RNN cell ID
         
         prev_layers = []
         
-        # Querying RNN Controller - for loop 1
+        # Query input layer idx for a node
         for i in range(2):
             # stack 2 layers for given layer ID.
             # this creates rnn layer that control a specific model layer only
@@ -150,10 +212,10 @@ class Controller():
             prev_c, prev_h = next_c, next_h
             
             # Query??? [IDK]
-            query = anchors_w1.gather(indices)
+            query = self.anchors_w1.gather(indices)
             query = tf.reshape(query, [layer_id, self.unit_dim])
             query = tf.tanh(query + tf.matmul(next_h[-1], self.w_attn_2))
-            query = tf.matmul(query, self.v_attn) # WHY Attention? [IDK]
+            query = tf.matmul(query, self.v_attn)
             logits = tf.reshape(query, [1, layer_id])
             
             # Softmax temperature :
@@ -173,77 +235,66 @@ class Controller():
             if self.tanh_constant is not None : 
                 logits = self.tanh_constant * tf.tanh(logits)
                 
-            # get best logit and select best parameter to use
+            # get best logit and select best layer index to use
+            # multinomial == argmax <- not exactly same but do similar work: extract best index among logits.
+            # argmax returns a value, EX) 3
+            # multinomial returns the probability of class. EX) [0,0,0,1,0]
             index = tf.multinomial(logits, 1)
             index tf.to_int32(index)
             index = tf.reshape(index, [1])
             
             # write selected model hyperparameter
-            arc_seq = arc_seq.write(start_id+2 * i, index)
+            self.arc_seq = self.arc_seq.write(start_id+2 * i, index)
             
             # a layer block controller loss
             curr_log_prob = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=index)
             log_prob += curr_log_prob
             
-            # a layer block controller entropy
-            # freeze entropy
+            # compute entropy of actions. but not update entropy to model. use only as reward.
             curr_ent = tf.stop_gradient(tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=tf.nn.softmax(logits)))
             entropy += curr_ent
             
-            # 잘모르겠다. 다음에 찾아서 주석 달아야겠어
-            prev_layers.append(anchors.read(tf.reduce_sum(index)))
+            prev_layers.append(self.anchors.read(tf.reduce_sum(index)))
             inputs = prev_layers[-1]
+            
+        return inputs, next_c, next_h, entorpy, log_prob
         
-        # 이건 뭘까.. Operation 1, 2 를 정의하는 부분같긴한데.. 정확히 무엇을 정의하는지 모르겠음.
-        # Softmax RNN Controller - for loop 1
+    def __create_op_sampler(self, layer_id, data, prev_c, prev_h, entorpy, log_prob):
+        # Softmax RNN Controller - for loop 2 : decide operation of nodes.
         for i in range(2):
             next_c, next_h = rnn_layer(inputs, prev_c, prev_h, self.w_recurrent)
             next_c, next_h = prev_c, prev_h
         
             logits = tf.matmul(next_h[-1], self.w_soft)
             
-            # Power Reducing 같은데 좀 더 보자.
+            # Softmax temperature (Softer Softmax)
             if self.temperature is not None : 
                 logits /= self.temperature
             
-            # hypublic tangent with Power Reducing
+            # Logits clipping
             if self.tanh_constant is not None : 
                 logits = self.tanh_constant * tf.tanh(logits)
             
+            # get best logit and select best layer index to use
             op_id = tf.multinomial(logits, 1)
             op_id = tf.to_int32(op_id)
             op_id = tf.reshape(op_id, [1])
             
-            arc_seq = arc_seq.write(start_id + 2 * i + 1, op_id)
+            # write operation id
+            self.arc_seq = self.arc_seq.write(start_id + 2 * i + 1, op_id)
             
+            # log probabilty of actions; controller loss
             curr_log_prob = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=op_id)
             log_prob += curr_log_prob
             
+            # compute entropy of actions. but not update entropy to model. use only as reward.
             curr_ent = tf.stop_gradient(tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=tf.nn.softmax(logits)))
             entropy += curr_ent
             
-            inputs = tf.nn.embedding_lookup(self.w_emb, op_id)
-        
-        loop_vars = [
-            tf.constant(2, dtype=tf.int32, name='layer_id'),
-            inputs, prev_c, prev_h,
-            anchors, anchors_w1, arc_seq,
-            tf.constant([0.,], dtype=tf.float32, name='entropy'),
-            tf.constant([0.,], dtype=tf.float32, name='log_prob'),
-        ]
-        
-        # Controller rnn cells until layer id reach the number of cells.
-        loop_outputs = tf.while_loop(condition, __create_layer_controller, loop_vars, parallel_iterations=1)
-        
-        arc_srq = arc_srq[-3].stack()
-        arc_srq = tf.reshape(arc_srq, [-1])
-        entropy = tf.reduce_sum(loop_outputs[-2])
-        log_prob = tf.reduce_sum(loop_outputs[-1])
-        
-        last_c = loop_outputs[-7] # loop_vars[-7] is prev_c
-        last_h = loop_outputs[-6] # loop_vars[-6] is prev_h
-        
-        return arc_seq, entropy, log_prob, last_c, last_b
+            # get current operation embedding vector as next rnn unit input.
+            inputs = tf.nn.embedding_lookup(self.branch_vector, op_id)
+            
+            return inputs, next_c, next_h, entorpy, log_prob
         
     def __create_trainer(self, child_model):
         child_model.build_valid_rl()
@@ -271,9 +322,10 @@ class Controller():
             
         # final model loss
         self.loss = self.sample_log_prob * (self.reward - self.baseline)
+        # get controller's weights only to train.
         vars_to_train = [var for var in tf.trainable_variables() if var.name.startswith(self.name)]
         
-        
+        # Create optimizer with given learning rate update policy.
         self.train_op, self.lr, self.grad_norm, self.optimizer = set_optimizer(
             self.loss,
             vars_to_train,
