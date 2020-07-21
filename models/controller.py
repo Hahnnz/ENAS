@@ -40,25 +40,26 @@ class Controller():
         self.op_tanh_reduce = op_tanh_reduce # softmax
         self.name = name # Contoller names
         
-        # Global controller train step
-        self.train_step = tf.Variable(0, dtype=tf.int32, trainable=False, name="train_step")
-        
-        # create anchor
-        self.anchors = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
-        self.anchors_w1 = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
-        
-        # child model decision sequence
-        self.arc_seq = tf.TensorArray(tf.int32, size=self.num_cells * 4)
-        
-        # initialize Controller Recurrent unit weights
-        self.__init_controller()
-        # Normal Cells
-        arc_seq_1, entropy_1, log_prob_1, c, h = self.__create_controller_body(use_bias=True)
-        # Reduce Cells
-        arc_seq_2, entropy_2, log_prob_2, _, _ = self.__create_controller_body(prev_c=c, prev_h=h)
-        self.sample_arc = (arc_seq_1, arc_seq_2)
-        self.sample_entropy = entropy_1 + entropy_2
-        self.sample_log_prob = log_prob_1 + log_prob_2
+        with tf.variable_scope(self.name):
+            # Global controller train step
+            self.train_step = tf.Variable(0, dtype=tf.int32, trainable=False, name="train_step")
+
+            # create anchor
+            self.anchors = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
+            self.anchors_w1 = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
+
+            # child model decision sequence
+            self.arc_seq = tf.TensorArray(tf.int32, size=self.num_cells * 4)
+
+            # initialize Controller Recurrent unit weights
+            self.__init_controller()
+            # Normal Cells
+            arc_seq_1, entropy_1, log_prob_1, c, h = self.__create_controller_body(use_bias=True)
+            # Reduce Cells
+            arc_seq_2, entropy_2, log_prob_2, _, _ = self.__create_controller_body(prev_c=c, prev_h=h)
+            self.sample_arc = (arc_seq_1, arc_seq_2)
+            self.sample_entropy = entropy_1 + entropy_2
+            self.sample_log_prob = log_prob_1 + log_prob_2
         
     def __init_controller(self):
         '''
@@ -69,39 +70,30 @@ class Controller():
         Output : 
             - None
         '''
-        with tf.variable_scope(self.name):
-            
-            # create recurrent unit layer with initializing 
-            self.w_recurrent = []
-            for l_id in range(self.num_layers):
-                with variable_scope(f'{self.unit_type}_layer_{l_id}'):
-                    __num_w_mat = 4 if self.unit_type == 'lstm' else 3
-                    w = tf.get_variable('weights', [2*self.unit_dims , __num_w_mat*self.unit_dims])
-                    self.w_recurrent.append(w)
-            
-            # create generator embeddings for each branch.
-            self.start_vector = tf.get_variable('start_vector', [1, self.unit_dim])
-            with tf.variable_scope('search_space_embedding'):
-                self.branch_vector = tf.get_variable('branch_vector', [self.num_branch, self.unit_dim])
-            
-            # Softmax weights
-            with tf.variable_scope('softmax'):
-                self.w_sotf  = tf.get_variable('weights', [self.unit_dim, self.num_branches])
-                
-                b_init = np.array([10.0, 10.0] + [0] * (self.num_branches - 2), dtype=np.float32)
-                self.b_soft = tf.get_variable('bias', [1, self.num_branches], initializer=tf.constant_initializer(b_init))
-                
-                # for the case if you dont use softmax weight
-                b_soft_no_learn = np.array([0.25, 0.25] + [-0.25] * (self.num_branches - 2), dtype=np.float32)
-                b_soft_no_learn = np.reshape(b_soft_no_learn, [1, self.num_branches])
-                self.b_soft_no_learn = tf.constant(b_soft_no_learn, dtype=tf.float32)
-                
-            # For query which index op or input to use.
-            with tf.variable_scope('attention'):
-                # thie attention matrix is for make enhance value of lstm output vector
-                self.w_attn_1 = tf.get_variable("weight_1", [self.lstm_size, self.lstm_size]) # for sampler
-                self.w_attn_2 = tf.get_variable("weight_2", [self.lstm_size, self.lstm_size]) # for child_layer_idx
-                self.v_attn = tf.get_variable("value", [self.lstm_size, 1]) # thie make what index of input or operator will be
+        # create recurrent unit layer with initializing 
+        self.w_recurrent = []
+        for l_id in range(self.num_layers):
+            with variable_scope(f'{self.unit_type}_layer_{l_id}'):
+                __num_w_mat = 4 if self.unit_type == 'lstm' else 3
+                w = tf.get_variable('weights', [2*self.unit_dims , __num_w_mat*self.unit_dims])
+                self.w_recurrent.append(w)
+
+        # create generator embeddings for each branch.
+        self.start_vector = tf.get_variable('start_vector', [1, self.unit_dim])
+        with tf.variable_scope('search_space_embedding'):
+            self.branch_vector = tf.get_variable('branch_vector', [self.num_branch, self.unit_dim])
+
+        # Softmax weights
+        with tf.variable_scope('softmax'):
+            self.w_sotf  = tf.get_variable('weights', [self.unit_dim, self.num_branches])
+
+            b_init = np.array([10.0, 10.0] + [0] * (self.num_branches - 2), dtype=np.float32)
+            self.b_soft = tf.get_variable('bias', [1, self.num_branches], initializer=tf.constant_initializer(b_init))
+
+            # for the case if you dont use softmax weight
+            b_soft_no_learn = np.array([0.25, 0.25] + [-0.25] * (self.num_branches - 2), dtype=np.float32)
+            b_soft_no_learn = np.reshape(b_soft_no_learn, [1, self.num_branches])
+            self.b_soft_no_learn = tf.constant(b_soft_no_learn, dtype=tf.float32)
     
     def __create_controller_body(self, prev_c=None, prev_h=None, use_bias=False):
         '''
@@ -193,8 +185,9 @@ class Controller():
             next_c, next_h = rnn_layer(inputs, prev_c, prev_h, self.w_recurrent)
             prev_c, prev_h = next_c, next_h
             
+            attn_w1 = tf.layers.dense(inputs=next_h[-1], units=self.unit_dim, use_bias=False, name='anchor_attn', reuse=tf.AUTO_REUSE)
             self.anchors = self.anchors.write(layer_id, tf.zeros_like(next_h[-1]))
-            self.anchors_w1 = self.anchors_w1.write(layer_id, tf.matmul(next_h[-1], self.w_attn_1))
+            self.anchors_w1 = self.anchors_w1.write(layer_id, attn_w1)
         
         return prev_c, prev_h
             
@@ -211,11 +204,12 @@ class Controller():
             next_c, next_h = rnn_layer(data, prev_c, prev_h, self.w_recurrent)
             prev_c, prev_h = next_c, next_h
             
-            # Query??? [IDK]
+            # Query what layer index will be used as node input.
             query = self.anchors_w1.gather(indices)
             query = tf.reshape(query, [layer_id, self.unit_dim])
-            query = tf.tanh(query + tf.matmul(next_h[-1], self.w_attn_2))
-            query = tf.matmul(query, self.v_attn)
+            attn_h = tf.layers.dense(inputs=next_h[-1], units=self.unit_dim, use_bias=False, name='vec_attn', reuse=tf.AUTO_REUSE)
+            query = tf.tanh(query+attn_h)
+            query = tf.layers.dense(inputs=query, units=1, use_bias=False, name='choose_idx', reuse=tf.AUTO_REUSE)
             logits = tf.reshape(query, [1, layer_id])
             
             # Softmax temperature :
