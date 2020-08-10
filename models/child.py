@@ -3,23 +3,6 @@ import tensorflow as tf
 from .layers import *
 from .utils import *
 
-# get shape size of a tensor
-def get_size(tensor, sname):
-    sname = sname.lower()
-    tensor_shape = tensor.get_shape()
-    shape_order = ['n','h','w','f'] if len(tensor_shape) == 4 else ['n','h','w','d','f']
-
-    assert len(tensor_shape) not in [4,5], 'tensor must have 4 or 5 dimensions with following order : [N,H,W,F] , [N,H,W,D,F]'
-    assert sname in shape_order, 'not available shape name. retry with {n : Batch size, h:Height, w:Width, d:Depth, f:Filter}'
-
-    s_idx = shape_order.index(sname)
-    return tensor_shape[s_idx].value
-
-# get strides size list to create stride.
-def get_strides(s_size):
-    assert type(ssize) == int, 'strides size should be given as integer.'
-    return [1, s_size, s_size, 1]
-
 # separable_convolution 2D & 3D
 def separable_conv(tensor, k_size, out_fsize, s_size, padding, use_bias, conv_mode='2d', conv_name=None):
     num_in_chn = tensor.get_shape()[-1].value
