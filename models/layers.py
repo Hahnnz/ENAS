@@ -1,65 +1,78 @@
 import tensorflow as tf
 
-def recurrent(num_hidden, 
-              cell_type='lstm', # LSTM or GRU
-              do_bidirect=False, 
-              # Activate Dropout
-              enable_drop=False, 
-              keep_prob=1, # Alive-ratio
-              # Activate and set Attention
-              enable_attn=False, 
-              attn_length=0, 
-              # Activate Residual
-              enable_residual=False, 
-              # Name
-              name_postfix=''):
+def rnn_layer(data, prev_c, prev_h, weights, unit_type='lstm'):
+    '''
+    args :
+        - data  : 
+
+    description : 
+
+
+    '''
+    unit_type = unit_type.lower()
+    if unit_type == 'lstm':
+        assert prev_c is not None, "'prev_c' is None. plz input prev_c"
+    elif unit_type == 'gru':
+        prev_c = [None for _ in range(prev_h)]
+    else : raise ValueError("'lstm' and 'gru' are your options. plz check the unitype again")
+
+    next_h = []
+    next_c = []
+    for layer_id, (c, h, w) in enumerate(zip(prev_c, prev_h, weights)): 
+        data = data if layer_id == 0 else next_h[-1]
+        curr_c, curr_h = recurrent(data, c, h, w, unit_type)
+        next_c.append(curr_c)
+        next_h.append(curr_h)
+    if unit_type == 'lstm':
+        return next_c, next_h
+    elif unit_type == 'gru':
+        return next_h
+
+def recurrent(data, prev_c, prev_h, weight, utype='lstm'):
+    if utype == 'lstm' : 
+        ifog = tf.matmul(tf.concat([data, prev_h], axis=1), weight)
+        i,f,o,g = tf.split(ifog, 4, axis=1)
+        i = tf.sigmoid(i)
+        f = tf.sigmoid(f)
+        o = tf.sigmoid(o)
+        g = tf.tanh(g)
+        next_c = i * g + f * prev_c
+        next_h = o * tf.tanh(next_c)
+
+        return next_c, next_h
+    elif utype == 'gru':
+        w_r, w_z, w_g = tf.split(rzg, 3, axis=1)
+        _in = tf.concat([data, prev_h], axis=1)
+
+        r = tf.sigmoid(tf.matmul(_in, w_r))
+        z = tf.sigmoid(tf.matmul(_in, w_z))
+        g = tf.tanh(tf.matmul(r*z, w_z))
+
+        next_h = z*_in + (1-z)*g
+
+        return next_h, prev_h
+
+# Child model operator (Search Space)
     
-    cell_type = cell_type.lower()
-    
-    # get Recurrent unit with the type you want
-    if cell_type == 'lstm':
-        rnn_cell = tf.nn.rnn_cell.LSTMCell
-    elif cell_type == 'gru':
-        rnn_cell = tf.nn.rnn_cell.GRUCell
+def conv(data, ksize, filters, ssize, padding, use_bias, conv_mode='2d' ,conv_name=None):
+    conv_mode = conv_mode.lower()
+    if conv_mode == '2d':
+        output = tf.layers.conv2d(data, kernel_size=ksize, filters=filters,
+                                  strides=(ssize,ssize),
+                                  padding=padding.upper(),
+                                  name=conv_name,use_bias=use_bias,
+                                  kernel_initializer=tf.contrib.layers.xavier_initializer())
+    elif conv_mode == '3d':
+        output = tf.layers.conv3d(data, kernel_size=ksize, filters=filters,
+                                  strides=(ssize,ssize,ssize),
+                                  padding=padding.upper(),
+                                  name=conv_name,use_bias=use_bias,
+                                  kernel_initializer=tf.contrib.layers.xavier_initializer())
     else :
-        raise ValueError(f'{cell_type} is not support! plz choose one of following cell type : "lstm", "gru".')
-        
-    # Name
-    layer_name = f'{cell_type}_layer' + name_postfix
-    if do_bidirect : 'bi'+layer_name
-    
-    # create recurrent unit.
-    with tf.variable_scope(layer_name) as scope:
-        forward_cell = rnn_cell(num_hidden, name='forward_cell')
-        
-        # Apply additional ops.
-        if enable_drop :
-            forward_cell = tf.nn.rnn_cell.DropoutWrapper(forward_cell, keep_prob)
-        if enable_residual : 
-            forward_cell = tf.nn.rnn_cell.ResidualWrapper(forward_cell)
-        if enable_attn : 
-            forward_cell = tf.contrib.rnn.AttentionCellWrapper(forward_cell, attn_length)
-            
-        # For bidirectional unit.
-        if do_bidirect : 
-            backward_cell = rnn_cell(num_hidden, name='backward_cell')
-            backward_cell = dropout(backward_cell, keep_prob)
-            if enable_residual : 
-                backward_cell = residal(backward_cell)
-            if enable_attn : 
-                backward_cell = attn(backward_cell, attn_length)
-            return forward_cell, backward_cell
-        else : 
-            return forward_cell
-    
-'''    
-def creaste_weights(name, shape, initializer=None, trainable=True, seed=None):
-    raise NotImplementedError("Abstract method.")
-    
-def creaste_bias(name, shape, initializer=None):
-    raise NotImplementedError("Abstract method.")
-'''    
-def dense(data, num_out, name=None, bn=True, use_bias=True, trainable=True):
+        raise ValueError('Convoltion mode : ['+conv_mode+'] is not available. plz select "2d" or "3d".')
+    return output
+
+def dense(data, num_out, name=None, use_bias=True, trainable=True):
     with tf.variable_scope(name) as scope:
         output = tf.layers.dense(inputs=data, use_bias=use_bias, units=num_out, trainable=trainable)
     return output
@@ -69,7 +82,7 @@ def batch_norm(data, is_train, trainable=True, name=None, data_format='channels_
     bn_axis = -1 if data_format == 'channels_last' else 1
     return tf.layers.batch_normalization(data, training=is_train, name=name, momentum=BN_MOMENTUM, axis=bn_axis,
                                          trainable=trainable, epsilon=BN_EPSILON, reuse=None, fused=USE_FUSED_BN)
-    
+
 def global_avg_pooling(data, mode='2d', name=None):
     with tf.name_scope(name):
         if mode == '2d' : 
@@ -79,12 +92,12 @@ def global_avg_pooling(data, mode='2d', name=None):
         else :
             raise ValueError("'mode' must be '2d' or '3d'.")
         return global_avg_pool(data)
-    
+
 def dropout(data, keep_prob, name=None):
     with tf.name_scope(name):
         return tf.nn.dropout(data, keep_prob, name=name)
-    
-def max_pooling(data, ksize=3, ssize=2, mode='2d', name=None):
+
+def max_pooling(data, ksize=3, ssize=2, mode='2d', padding='SAME', name=None):
     with tf.name_scope(name):
         if mode == '2d':
             return tf.nn.max_pool(data, ksize=[1,ksize,ksize,1], strides=[1,ssize,ssize,1], padding="SAME", name=name)
@@ -93,9 +106,9 @@ def max_pooling(data, ksize=3, ssize=2, mode='2d', name=None):
         else :
             raise ValueError('Max Pooling mode : ['+conv_mode+'] is not available. plz select "2d" or "3d".')
 
-def avg_pooling(data, ksize=3, ssize=2, mode='2d', name=None):
+def avg_pooling(data, ksize=3, ssize=2, mode='2d', padding='SAME', name=None):
     with tf.name_scope(name):
         if mode == '2d' : 
-            return tf.nn.avg_pool(data, ksize=[1,ksize,ksize,1], strides=[1,ssize,ssize,1], padding="VALID", name=name)
+            return tf.nn.avg_pool(data, ksize=[1,ksize,ksize,1], strides=[1,ssize,ssize,1], padding=padding, name=name)
         elif mode == '3d' :
-            return tf.nn.avg_pool3d(data, ksize=[1,ksize,ksize,ksize,1], strides=[1,ssize, ssize,ssize,1], padding="VALID", name=name)
+            return tf.nn.avg_pool3d(data, ksize=[1,ksize,ksize,ksize,1], strides=[1,ssize, ssize,ssize,1], padding=padding, name=name)
