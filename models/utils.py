@@ -1,19 +1,24 @@
 import tensorflow as tf
 import numpy as np
 
-class config_lr_options:
-    def __init__(self,
-                 warmup_val=None,
-                 warmup_steps=1e3,
-                 decay_start=0,
-                 decay_every=1e4,
-                 decay_rate=1e-1,
-                 decay_min=None,
-                 lr_cosine=False,
-                 max_lr=None,
-                 min_lr=None,
-                 T_0=None,
-                 T_mul=None,):
+class config_options:
+    def __init__():
+        pass
+    
+    # Lerarning rate update policy of optimizer
+    def lr(self,
+           warmup_val=None,
+           warmup_steps=1e3,
+           decay_start=0,
+           decay_every=1e4,
+           decay_rate=1e-1,
+           decay_min=None,
+           lr_cosine=False,
+           max_lr=None,
+           min_lr=None,
+           T_0=None,
+           T_mul=None,):
+        
         self.lr_warmup_val=warmup_val
         self.lr_warmup_steps=warmup_steps
         self.lr_dec_start=decay_start
@@ -25,8 +30,28 @@ class config_lr_options:
         self.lr_min=min_lr
         self.lr_T_0=T_0
         self.lr_T_mul=T_mul
+        
+    # gradient update policy of optimizer
 
-
+    def gradient(self,
+                 l2_reg=1e-4,
+                 clip_mode=None,
+                 grad_threshold=None, 
+                 sync_replicas=False,
+                 num_aggregate=None,
+                 num_replicas=None,
+                 get_grad_norms=False,
+                 moving_average=None):
+        
+        self.l2_reg=l2_reg,
+        self.clip_mode=clip_mode,
+        self.grad_threshold=grad_threshold, 
+        self.sync_replicas=sync_replicas,
+        self.num_aggregate=num_aggregate,
+        self.num_replicas=num_replicas,
+        self.get_grad_norms=get_grad_norms,
+        self.moving_average=moving_average
+        
 def set_optimizer(
     loss_op,
     vars2train,
@@ -58,7 +83,8 @@ def set_optimizer(
     num_aggregate=None,
     num_replicas=None,
     get_grad_norms=False,
-    moving_average=None):
+    moving_average=None,
+    grad_options=None):
     
     # take learning Rate options from configuration class
     if lr_options is not None :
@@ -73,6 +99,17 @@ def set_optimizer(
         lr_min = lr_options.lr_min
         lr_T_0 = lr_options.lr_T_0
         lr_T_mul = lr_options.lr_T_mul 
+        
+    # take Optimization policy options from configuration class
+    if grad_options is not None :
+        l2_reg = grad_options.l2_reg
+        clip_mode = grad_options.clip_mode
+        grad_threshold = grad_options.grad_threshold
+        sync_replicas = grad_options.sync_replicas
+        num_aggregate = grad_options.num_aggregate
+        num_replicas = grad_options.num_replicas
+        get_grad_norms = grad_options.get_grad_norms
+        moving_average = grad_options.moving_average
     
     # l2 regularization
     if l2_reg > 0 :
@@ -111,7 +148,7 @@ def set_optimizer(
     
     # Learning Rates Update Policy
     '''
-    Bello, Irwan, Pham, Hieu, Le, Quoc V., Norouzi, Moham- mad, and Bengio, Samy. Neural combinatorial optimiza- tion with reinforcement learning. In ICLR Workshop, 2017a.
+    Bello, Irwan, Pham, Hieu, Le, Quoc V., Norouzi, Moham- mad, and Bengio, Samy. Neural combinatorial optimization with reinforcement learning. In ICLR Workshop, 2017a.
     https://arxiv.org/pdf/1611.09940.pdf
     
     Loshchilov, Ilya and Hutter, Frank. Sgdr: Stochastic gradient descent with warm restarts. In ICLR, 2017
