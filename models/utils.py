@@ -1,10 +1,8 @@
 import tensorflow as tf
 import numpy as np
+from copy import deepcopy
 
 class config_options:
-    def __init__():
-        pass
-    
     # Lerarning rate update policy of optimizer
     def lr(self,
            warmup_val=None,
@@ -19,17 +17,20 @@ class config_options:
            T_0=None,
            T_mul=None,):
         
-        self.lr_warmup_val=warmup_val
-        self.lr_warmup_steps=warmup_steps
-        self.lr_dec_start=decay_start
-        self.lr_dec_every=decay_every
-        self.lr_dec_rate=decay_rate
-        self.lr_dec_min=decay_min
-        self.lr_cosine=lr_cosine
-        self.lr_max=max_lr
-        self.lr_min=min_lr
-        self.lr_T_0=T_0
-        self.lr_T_mul=T_mul
+        config = deepcopy(self)
+        
+        config.lr_warmup_val=warmup_val
+        config.lr_warmup_steps=warmup_steps
+        config.lr_dec_start=decay_start
+        config.lr_dec_every=decay_every
+        config.lr_dec_rate=decay_rate
+        config.lr_dec_min=decay_min
+        config.lr_cosine=lr_cosine
+        config.lr_max=max_lr
+        config.lr_min=min_lr
+        config.lr_T_0=T_0
+        config.lr_T_mul=T_mul
+        return config
         
     # gradient update policy of optimizer
 
@@ -43,14 +44,17 @@ class config_options:
                  get_grad_norms=False,
                  moving_average=None):
         
-        self.l2_reg=l2_reg,
-        self.clip_mode=clip_mode,
-        self.grad_threshold=grad_threshold, 
-        self.sync_replicas=sync_replicas,
-        self.num_aggregate=num_aggregate,
-        self.num_replicas=num_replicas,
-        self.get_grad_norms=get_grad_norms,
-        self.moving_average=moving_average
+        config = deepcopy(self)
+        
+        config.l2_reg=l2_reg,
+        config.clip_mode=clip_mode,
+        config.grad_threshold=grad_threshold, 
+        config.sync_replicas=sync_replicas,
+        config.num_aggregate=num_aggregate,
+        config.num_replicas=num_replicas,
+        config.get_grad_norms=get_grad_norms,
+        config.moving_average=moving_average
+        return config
         
 def set_optimizer(
     loss_op,
