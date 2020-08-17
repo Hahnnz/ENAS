@@ -46,13 +46,13 @@ class config_options:
         
         config = deepcopy(self)
         
-        config.l2_reg=l2_reg,
-        config.clip_mode=clip_mode,
-        config.grad_threshold=grad_threshold, 
-        config.sync_replicas=sync_replicas,
-        config.num_aggregate=num_aggregate,
-        config.num_replicas=num_replicas,
-        config.get_grad_norms=get_grad_norms,
+        config.l2_reg=l2_reg
+        config.clip_mode=clip_mode
+        config.grad_threshold=grad_threshold
+        config.sync_replicas=sync_replicas
+        config.num_aggregate=num_aggregate
+        config.num_replicas=num_replicas
+        config.get_grad_norms=get_grad_norms
         config.moving_average=moving_average
         return config
         
@@ -119,26 +119,26 @@ def set_optimizer(
     if l2_reg > 0 :
         l2_losses = [tf.reduce_sum(var**2) for var in vars2train]
         l2_losses = tf.add_n(l2_losses)
-        loss += l2_reg * l2_losses
+        loss_op += l2_reg * l2_losses
         
     # Compute gradients for given trainable variables
-    gradients = tf.gradients(loss, vars2train)
+    gradients = tf.gradients(loss_op, vars2train)
     grad_norm = tf.global_norm(gradients)
     
     grad_norms = {}
     for var, grad in zip(vars2train, gradients):
         if var is None or grad is None : continue
         if isinstance(grad, tf.IndexedSlices):
-            grad_norms[v.name] = tf.sqrt(tf.reduce_sum(grad.values ** 2))
+            grad_norms[var.name] = tf.sqrt(tf.reduce_sum(grad.values ** 2))
         else : 
-            grad_norms[v.name] = tf.sqrt(tf.reduce_sum(grad ** 2))
+            grad_norms[var.name] = tf.sqrt(tf.reduce_sum(grad ** 2))
             
     # Clip gradient at given threshold
     if clip_mode is not None :
         assert grad_threshold is not None, 'Need "grad_threshold" to clip gradients'
         if clip_mode == 'global':
             gradients, _ = tf.tf.clip_by_global_norm(gradients, grad_threshold)
-        elif slip_mode == 'norm':
+        elif clip_mode == 'norm':
             clipped = []
             for grad in gradients:
                 if isinstance(gradients, tf.IndexedSlices):
@@ -214,16 +214,21 @@ def set_optimizer(
         optimizer = RAdamOptimizer(learning_rate=learning_rate)
     else : raise ValueError("{} optimizer isn't supported.".format(optimizer_type))
         
-    optimizer = tf.train.SyncReplicasOptimizer(optimizer, 
-                                               replicas_to_aggregate = num_aggregate, 
-                                               total_num_replicas = num_replicas,
-                                               use_locking=True)
+        
+    if sync_replicas:
+        assert num_aggregate is not None, "Need num_aggregate to sync."
+        assert num_replicas is not None, "Need num_replicas to sync."
+        
+        optimizer = tf.train.SyncReplicasOptimizer(optimizer, 
+                                                   replicas_to_aggregate = num_aggregate, 
+                                                   total_num_replicas = num_replicas,
+                                                   use_locking=True)
     if moving_average is not None:
         optimizer = tf.contrib.opt.MovingAverageOptimizer(optimizer, average_decay=moving_average)
         
     train_op = optimizer.apply_gradients(zip(gradients, vars2train), global_step=train_step)
     
-    result = train_op, learning_rate, grad_norm, opt, grad_norms
-    
-    if get_grad_norms : return train_op, learning_rate, grad_norm, optimizer, grad_norms
-    else : return train_op, learning_rate, grad_norm, optimizer
+    if get_grad_norms : 
+        return train_op, learning_rate, grad_norm, optimizer, grad_norms
+    else : 
+        return train_op, learning_rate, grad_norm, optimizer
