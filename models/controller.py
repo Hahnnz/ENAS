@@ -46,27 +46,21 @@ class Controller():
         self.temperature = temperature # Softmax temperature
         self.tanh_constant = tanh_constant
         self.name = name # Contoller names
-        
-        # Set graph and session.
-        if graph is None :
-            self.graph = tf.Graph()
 
-        with self.graph.as_default():
-        
-            with tf.variable_scope(self.name):
-                # Global controller train step
-                self.train_step = tf.Variable(0, dtype=tf.int32, trainable=False, name="train_step")
+        with tf.variable_scope(self.name):
+            # Global controller train step
+            self.train_step = tf.Variable(0, dtype=tf.int32, trainable=False, name="train_step")
 
-                # initialize Controller Recurrent unit weights
-                self.__init_controller()
+            # initialize Controller Recurrent unit weights
+            self.__init_controller()
 
-                # Normal Cells
-                arc_seq_1, entropy_1, log_prob_1, c, h = self.__create_controller_body(use_bias=True)
-                # Reduce Cells
-                arc_seq_2, entropy_2, log_prob_2, _, _ = self.__create_controller_body(prev_c=c, prev_h=h)
-                self.sample_arc = (arc_seq_1, arc_seq_2)
-                self.sample_entropy = entropy_1 + entropy_2
-                self.sample_log_prob = log_prob_1 + log_prob_2
+            # Normal Cells
+            arc_seq_1, entropy_1, log_prob_1, c, h = self.__create_controller_body(use_bias=True, name='Normal_Cells')
+            # Reduce Cells
+            arc_seq_2, entropy_2, log_prob_2, _, _ = self.__create_controller_body(prev_c=c, prev_h=h, name='Reduction_Cells')
+            self.sample_arc = (arc_seq_1, arc_seq_2)
+            self.sample_entropy = entropy_1 + entropy_2
+            self.sample_log_prob = log_prob_1 + log_prob_2
             
     def __init_controller(self):
         '''
@@ -102,7 +96,7 @@ class Controller():
             b_soft_no_learn = np.reshape(b_soft_no_learn, [1, self.num_branch])
             self.b_soft_no_learn = tf.constant(b_soft_no_learn, dtype=tf.float32)
     
-    def __create_controller_body(self, prev_c=None, prev_h=None, use_bias=False):
+    def __create_controller_body(self, prev_c=None, prev_h=None, use_bias=False, name='Controller_Body'):
         '''
         Description : 
         Arguments : 
@@ -120,56 +114,57 @@ class Controller():
                 True : if current layer id **over** than given number of layers.
                 False : if current layer id **less** than given number of layers.
             '''
-
+            import sys
+            tf.print(layer_id, output_stream=sys.stderr)
             return tf.less(layer_id, self.num_cells + 2)
         
         # create anchor
-        anchors = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
-        anchors_w1 = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False)
-        # child model decision sequence
-        arc_seq = tf.TensorArray(tf.int32, size=self.num_cells * 4)
-        
-        self.__use_bias=use_bias
-        # create first skip connection
-        prev_c, prev_h, anchors, anchors_w1 = self.__create_anchor_sampler(anchors, anchors_w1, gen_anchor=2)
-        inputs = self.start_vector
-        test = 0
-        
-        def pipeline(layer_id, inputs, prev_c, prev_h, anchors, anchors_w1, arc_seq, entropy, log_prob):
-            # node inputs
-            inputs, prev_c, prev_h, anchors, anchors_w1, arc_seq, entropy, log_prob = self.__create_input_sampler(layer_id, inputs, prev_c, prev_h, anchors, anchors_w1, arc_seq, entropy, log_prob)
-            # node operations
-            inputs, prev_c, prev_h, arc_seq, entropy, log_prob = self.__create_op_sampler(inputs, prev_c, prev_h, arc_seq, entropy, log_prob)
-            # node anchor
-            prev_c, prev_h, anchors, anchors_w1, = self.__create_anchor_sampler(anchors, anchors_w1, prev_c=prev_c, prev_h=prev_h, use_bias=self.__use_bias)
-            # initialize input as start vector
+        with tf.variable_scope(name):
+            anchors = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False, name='Anchor')
+            anchors_w1 = tf.TensorArray(tf.float32, size=self.num_cells + 2, clear_after_read=False, name='Anchor_w1')
+            # child model Architecture sequence
+            arc_seq = tf.TensorArray(tf.int32, size=self.num_cells * 4, name='Architecture_Sequence')
+            
+            self.__use_bias=use_bias
+            # create first layer vector
+            prev_c, prev_h, anchors, anchors_w1 = self.__create_anchor_sampler(0, anchors, anchors_w1, prev_c=prev_c, prev_h=prev_h, gen_anchor=2)
             inputs = self.start_vector
-            return (layer_id+1, inputs, prev_c, prev_h, anchors, anchors_w1, arc_seq, entropy, log_prob, )
-        
-        # loop variables the 
-        loop_vars = [
-            tf.constant(2, dtype=tf.int32, name='layer_id'), # 0 and 1 are stem layers.
-            inputs, prev_c, prev_h,
-            # entropy and log_prob will be appended.
-            anchors, anchors_w1, arc_seq, 
-            tf.constant([0.,], dtype=tf.float32, name='entropy'),
-            tf.constant([0.,], dtype=tf.float32, name='log_prob'),
-        ]
-        
-        # Controller rnn cells until layer id reach the number of cells.
-        loop_outputs = tf.while_loop(check_length, pipeline, loop_vars, parallel_iterations=1)
-        
-        arc_seq = loop_outputs[-3].stack()
-        arc_seq = tf.reshape(arc_seq, [-1]) # make 1D tensor array
-        entropy = tf.reduce_sum(loop_outputs[-2])
-        log_prob = tf.reduce_sum(loop_outputs[-1])
-        
-        last_c = loop_outputs[-6] # loop_vars[-7] is 'prev_c'
-        last_h = loop_outputs[-5] # loop_vars[-6] is 'prev_h'
-        
+            
+            def pipeline(layer_id, inputs, prev_c, prev_h, anchors, anchors_w1, arc_seq, entropy, log_prob):
+                # node inputs
+                inputs, prev_c, prev_h, arc_seq, entropy, log_prob = self.__create_input_sampler(layer_id, inputs, prev_c, prev_h, anchors, anchors_w1, arc_seq, entropy, log_prob)
+                # node operations
+                inputs, prev_c, prev_h, arc_seq, entropy, log_prob = self.__create_op_sampler(inputs, prev_c, prev_h, arc_seq, entropy, log_prob)
+                # node anchor
+                prev_c, prev_h, anchors, anchors_w1 = self.__create_anchor_sampler(layer_id, anchors, anchors_w1, prev_c=prev_c, prev_h=prev_h, use_bias=self.__use_bias)
+                # initialize input as star=t vector
+                inputs = self.start_vector
+                return (layer_id+1, inputs, prev_c, prev_h, anchors, anchors_w1, arc_seq, entropy, log_prob)
+
+            # loop variables the 
+            loop_vars = [
+                tf.constant(2, dtype=tf.int32, name='layer_id'), # 0 and 1 are stem layers.
+                inputs, prev_c, prev_h,
+                anchors, anchors_w1, arc_seq, 
+                tf.constant([0.,], dtype=tf.float32, name='entropy'),
+                tf.constant([0.,], dtype=tf.float32, name='log_prob'),
+            ]
+
+            # Controller rnn cells until layer id reach the number of cells.
+            loop_outputs = tf.while_loop(check_length, pipeline, loop_vars, parallel_iterations=1)
+            
+            _, _, last_c, last_h, _, _, arc_seq, entropy, log_prob = loop_outputs
+            
+            arc_seq = tf.reshape(arc_seq.stack(), [-1]) # make 1D tensor array
+            entropy = tf.reduce_sum(entropy)
+            log_prob = tf.reduce_sum(log_prob)
+            
+            
+            
+            
         return arc_seq, entropy, log_prob, last_c, last_h
         
-    def __create_anchor_sampler(self, anchors, anchors_w1, inputs=None, gen_anchor=1, prev_c=None, prev_h=None, use_bias=False):
+    def __create_anchor_sampler(self, layer_id, anchors, anchors_w1, inputs=None, gen_anchor=1, prev_c=None, prev_h=None, use_bias=False):
         '''
         Description :
             create sampler for skip connection, anchor.
@@ -198,16 +193,20 @@ class Controller():
             # initialize Generator embedding vectors
             inputs = self.start_vector
             
-        for layer_id in range(gen_anchor):
+        for _ in range(gen_anchor):
             next_c, next_h = rnn_layer(inputs, prev_c, prev_h, self.w_recurrent, unit_type='lstm')
             
             attn_w1 = tf.layers.dense(inputs=next_h[-1], units=self.unit_dim, use_bias=False, name='anchor_attn', reuse=tf.AUTO_REUSE)
+            anchors_w1 = anchors_w1.write(layer_id, attn_w1)
+            
             if create_zero_vec:
                 anchors = anchors.write(layer_id, tf.zeros_like(next_h[-1]))
             else :
                 anchors = anchors.write(layer_id, next_h[-1])
-            anchors_w1 = anchors_w1.write(layer_id, attn_w1)
-        
+            
+            if gen_anchor > 1:
+                layer_id+=1
+            
         return next_c, next_h, anchors, anchors_w1
             
     def __create_input_sampler(self, layer_id, data, prev_c, prev_h, anchors, anchors_w1, arc_seq, entropy, log_prob):
@@ -257,7 +256,7 @@ class Controller():
             index = tf.reshape(index, [1])
             
             # write selected model hyperparameter
-            arc_seq = arc_seq.write(self.__start_id+2 * i, index)
+            arc_seq = arc_seq.write(self.__start_id+2*i, index)
             
             # a layer block controller loss
             curr_log_prob = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=index)
@@ -271,7 +270,7 @@ class Controller():
             prev_layers.append(anchors.read(tf.reduce_sum(index)))
             inputs = prev_layers[-1]
             
-        return inputs, next_c, next_h, anchors, anchors_w1, arc_seq, entropy, log_prob
+        return inputs, next_c, next_h, arc_seq, entropy, log_prob
         
     def __create_op_sampler(self, inputs, prev_c, prev_h, arc_seq, entropy, log_prob):
         # Softmax RNN Controller - for loop 2 : decide operation of nodes.
@@ -295,7 +294,7 @@ class Controller():
             op_id = tf.reshape(op_id, [1])
             
             # write operation id
-            arc_seq = arc_seq.write(self.__start_id + 2 * i + 1, op_id)
+            arc_seq = arc_seq.write(self.__start_id+2*i+1, op_id)
             
             # log probabilty of actions; controller loss
             curr_log_prob = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=op_id)
