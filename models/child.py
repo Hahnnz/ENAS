@@ -36,14 +36,17 @@ def separable_conv(tensor, k_size, out_fsize, s_size, padding, use_bias, conv_mo
     
 class Child:
     '''
+    Classification Child network
+    
     All Child Class function assume data format is 'NHWC'.
     '''
     def __init__(self,
                  input_shape,
                  num_classes,
-                 lr_init,
                  lr_options,
+                 grad_options,
                  out_fsize,
+                 opt_algo='adam',
                  fixed_arc=None,
                  batch_size=None,
                  num_stem_out=2,
@@ -68,27 +71,74 @@ class Child:
             raise ValueError('input shape must have length of 3(w,h,chn) or 4(w,h,d,chn).')
 
         self.batch_size = batch_size
+        self.optimizer_type = opt_algo
         self.__num_stem_out = num_stem_out # How many outputs that you want to create at Stage1.
+        self.__input_shape = input_shape
         self.num_layers = num_layers # number of layers to search
         self.out_fsize = out_fsize
         self.num_cells = num_cells
         self.num_classes = num_classes
         self.fixed_arc = fixed_arc
-
-
-        # merge batch size with input shape. (N,W,H,C) or (N,W,H,D,C) if 3D
-        shape_type = type(input_shape)
-        input_shape = shape_type([batch_size]) + input_shape
-        target_shape = shape_type([batch_size]) + shape_type([1]) # Classification only for now
-
+        self.model_name = model_name
+        
+        self.lr_options = lr_options
+        self.grad_options = grad_options
+        
+        '''
         # Child model placeholders
         with tf.variable_scope(model_name, reuse=reuse):
             self.input_x = tf.placeholder(tf.float32, input_shape, name='input_x')
-            self.target = tf.placeholder(tf.int32, target_shape, name='target')
+            self.targets = tf.placeholder(tf.int32, target_shape, name='target')
             self.is_train = tf.placeholder(tf.bool, name='is_train')
             self.keep_prob = tf.placeholder(tf.float32, name='alive_ratio')
+            self.lr_init = tf.placeholder(tf.float32, name='initial_learning_rate')
+            
+            self.global_step = tf.Variable(0, dtype=tf.int32, trainable=False, name="global_step")
+        '''
+    def initialize(self):
+        with tf.variable_scope(self.model_name):
+            
+            # merge batch size with input shape. (N,W,H,C) or (N,W,H,D,C) if 3D
+            shape_type = type(self.__input_shape)
+            input_shape = shape_type([self.batch_size]) + self.__input_shape
+            target_shape = shape_type([self.batch_size]) # Classification only for now
+            
+            self.input_x = tf.placeholder(tf.float32, input_shape, name='input_x')
+            self.targets = tf.placeholder(tf.int32, target_shape, name='target')
+            self.is_train = tf.placeholder(tf.bool, name='is_train')
+            self.keep_prob = tf.placeholder(tf.float32, name='alive_ratio')
+            self.lr_init = tf.placeholder(tf.float32, name='initial_learning_rate')
+            
+            self.global_step = tf.Variable(0, dtype=tf.int32, trainable=False, name="global_step")
+            
+            self.logits = self.__model()
+            #one_hot_labels = tf.one_hot(self.target,depth=self.num_classes,axis=-1,dtype=tf.int32)
+            #one_hot_labels = tf.squeeze(one_hot_labels)
+            #log_probs = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.logits, labels=one_hot_labels)
+            log_probs = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.logits, labels=self.targets)
+            self.loss = tf.reduce_mean(log_probs)
 
-    def init_model(self,reuse=False):
+            self.train_preds = tf.argmax(self.logits, axis=-1)
+            self.train_preds = tf.to_int32(self.train_preds)
+            self.train_acc = tf.equal(self.train_preds, self.targets)
+            self.train_acc = tf.to_int32(self.train_acc)
+            self.train_acc = tf.reduce_sum(self.train_acc)
+
+
+            vars_to_train = [ var for var in tf.trainable_variables() if (
+                var.name.startswith(self.model_name) and "aux_head" not in var.name)]
+
+            self.train_op, self.lr, self.grad_norm, self.optimizer = set_optimizer(
+                self.loss,
+                vars_to_train,
+                self.global_step,
+                lr_init=self.lr_init,
+                optimizer_type=self.optimizer_type,
+                lr_options=self.lr_options,
+                grad_options=self.grad_options,
+            )
+    
+    def __model(self,reuse=False):
         # Stage.1 Stem Convolution - First two inputs
         with tf.variable_scope('stem_conv', reuse=reuse):
             tensor = conv(self.input_x,
@@ -350,21 +400,17 @@ class Child:
         
         used = []
         result = []
-
         
         for c_id in range(self.num_cells):
-            #prev_layers = tf.stack(layers, axis=0)
+            prev_layers = tf.stack(layers, axis=0)
             with tf.variable_scope(f'cell_{c_id}'):
                 # compute input with given operation
-                for idx, tensor in enumerate(layers):
+                for idx in range(2):
                     with tf.variable_scope(f'input_{idx}'):
                         inp_id = arc[ (4*c_id) + (idx*2) ]
                         inp_op = arc[ (4*c_id) + (idx*2) +1 ]
                         
-                        selected = tensor[inp_id]
-                        if len(selected.shape) != len(tensor.shape):
-                            tensor = tf.expand_dims(selected, axis=0)
-                        
+                        tensor = prev_layers[inp_id]
                         tensor = self._create_control_cell(tensor, c_id, inp_id, inp_op, out_fsize)
                         result.append(tensor)
 
@@ -379,35 +425,43 @@ class Child:
         indices = tf.reshape(indices, [-1])
         num_outs = tf.size(indices)
 
-        out = tf.stack(layers, axis=0)                
+        out = tf.stack(layers, axis=0)
         out = tf.gather(out, indices, axis=0)
         
         inp = prev_layers[0]
-        out = tf.squeeze(out,1)
-        '''
         orig_shape = inp.get_shape().as_list()
-        print(orig_shape)
-        print(out.shape)
-
+        out_shape = out.get_shape().as_list()
+        
+        
+        N = tf.shape(inp)[0]
+        H = tf.shape(inp)[1]
+        W = tf.shape(inp)[2]
+        C = tf.shape(inp)[3]        
+        
         if self.conv_mode == '2d':
             shape_reorder = [1,2,3,0,4]
         else :
-            reorder_shape = [1,2,3,4,0,5] 
-
-        shape_resize = [orig_shape[i] for i in shape_reorder]
-        concat_out_fsize = (lambda x,y : x*y)(shape_resize[-2:])
+            shape_reorder = [1,2,3,4,0,5] 
         
-        out = tf.transpose(out, reorder_shape)
-        out = tf.reshape(out, shape_resize[:-2]+[concat_out_fsize])
-        '''
+        out = tf.transpose(out, shape_reorder)
+        out = tf.reshape(out, [N,H,W,num_outs*out_fsize])
+        
         with tf.variable_scope('final_conv'):
+            initializer = tf.contrib.keras.initializers.he_normal()
+            w = tf.get_variable('weight', [self.num_cells + 2, out_fsize * out_fsize], initializer=initializer)
+            w = tf.gather(w, indices, axis=0)
+            w = tf.reshape(w, [1, 1, num_outs * out_fsize, out_fsize])
+            out = tf.nn.relu(out)
+            out = tf.nn.conv2d(out, w, strides=[1, 1, 1, 1], padding="SAME")
+            out = batch_norm(out, self.is_train)
+            '''
             out = tf.nn.relu(out)
             out = conv(out, 1, out_fsize, 1, 'SAME', False, self.conv_mode)
             out = batch_norm(out, self.is_train)
-
-        #out = tf.reshape(out, tf.shape(prev_layers[0]))
+            '''
+        out = tf.reshape(out, tf.shape(prev_layers[0]))
         return out
-
+    
     def connect_controller(self, controller_model):
         if self.fixed_arc is None :
             self.normal_arc, self.reduce_arc = controller_model.sample_arc
