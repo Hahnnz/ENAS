@@ -117,13 +117,14 @@ class Child:
             #log_probs = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.logits, labels=one_hot_labels)
             log_probs = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.logits, labels=self.targets)
             self.loss = tf.reduce_mean(log_probs)
-
+            
+            '''
             self.train_preds = tf.argmax(self.logits, axis=-1)
             self.train_preds = tf.to_int32(self.train_preds)
             self.train_acc = tf.equal(self.train_preds, self.targets)
             self.train_acc = tf.to_int32(self.train_acc)
             self.train_acc = tf.reduce_sum(self.train_acc)
-
+            '''
 
             vars_to_train = [ var for var in tf.trainable_variables() if (
                 var.name.startswith(self.model_name) and "aux_head" not in var.name)]
@@ -470,6 +471,7 @@ class Child:
             self.normal_arc = fixed_arc[:4 * self.num_cells]
             self.reduce_arc = fixed_arc[4 * self.num_cells:]
 
+            
 ###########################
 # Fixed Layer Zone. [WIP] #
 ###########################
