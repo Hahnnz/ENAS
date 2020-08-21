@@ -7,14 +7,17 @@ from .utils import set_optimizer
 
 class Controller():
     def __init__(self, 
+                 lr_options,
+                 grad_options,
                  batch_size=None, 
                  utype='lstm', # recurrent unit type
-                 otype='adam', # optimizer type
+                 optimizer_type='adam', # optimizer type
                  num_stack_rnn=1, # Number of Recurrent unit layer
                  unit_dim=32, # number of channel of recurrent unit
                  num_branch=5, # Number of operation (size of search space for operator)
                  num_cells=5,
                  lr_init=1e-3,
+                 bl_dec=0.999,
                  entropy_weight=None,
                  op_tanh_reduce=1.0,
                  temperature=None,
@@ -34,18 +37,21 @@ class Controller():
         '''
         
         self.batch_size = batch_size
-        self.optimizer_type = otype # optimizer type
+        self.optimizer_type = optimizer_type # optimizer type
         self.unit_type = utype # recurrent unit type
         self.num_stack_rnn = num_stack_rnn # Number of Recurrent cell 
         self.unit_dim = unit_dim # number of channel of recurrent unit
         self.num_branch = num_branch # number of hyperparameter you want
         self.num_cells = num_cells #  
         self.lr_init = lr_init
+        self.lr_options = lr_options
+        self.grad_options = grad_options
         self.entropy_weight = entropy_weight # entropy weight of reward entropy
         self.op_tanh_reduce = op_tanh_reduce # softmax
         self.temperature = temperature # Softmax temperature
         self.tanh_constant = tanh_constant
         self.name = name # Contoller names
+        self.bl_dec = bl_dec
 
         with tf.variable_scope(self.name):
             # Global controller train step
@@ -61,6 +67,8 @@ class Controller():
             self.sample_arc = (arc_seq_1, arc_seq_2)
             self.sample_entropy = entropy_1 + entropy_2
             self.sample_log_prob = log_prob_1 + log_prob_2
+            
+            self.__create_trainer()
             
     def __init_controller(self):
         '''
@@ -83,7 +91,7 @@ class Controller():
         self.start_vector = tf.get_variable('start_vector', [1, self.unit_dim])
         with tf.variable_scope('search_space_embedding'):
             self.branch_vector = tf.get_variable('branch_vector', [self.num_branch, self.unit_dim])
-
+        '''
         # Softmax weights
         with tf.variable_scope('softmax'):
             self.w_soft  = tf.get_variable('weights', [self.unit_dim, self.num_branch])
@@ -95,6 +103,7 @@ class Controller():
             b_soft_no_learn = np.array([0.25, 0.25] + [-0.25] * (self.num_branch - 2), dtype=np.float32)
             b_soft_no_learn = np.reshape(b_soft_no_learn, [1, self.num_branch])
             self.b_soft_no_learn = tf.constant(b_soft_no_learn, dtype=tf.float32)
+        '''
     
     def __create_controller_body(self, prev_c=None, prev_h=None, use_bias=False, name='Controller_Body'):
         '''
@@ -115,7 +124,6 @@ class Controller():
                 False : if current layer id **less** than given number of layers.
             '''
             import sys
-            tf.print(layer_id, output_stream=sys.stderr)
             return tf.less(layer_id, self.num_cells + 2)
         
         # create anchor
@@ -136,7 +144,7 @@ class Controller():
                 # node operations
                 inputs, prev_c, prev_h, arc_seq, entropy, log_prob = self.__create_op_sampler(inputs, prev_c, prev_h, arc_seq, entropy, log_prob)
                 # node anchor
-                prev_c, prev_h, anchors, anchors_w1 = self.__create_anchor_sampler(layer_id, anchors, anchors_w1, prev_c=prev_c, prev_h=prev_h, use_bias=self.__use_bias)
+                prev_c, prev_h, anchors, anchors_w1 = self.__create_anchor_sampler(layer_id, anchors, anchors_w1, inputs=inputs,prev_c=prev_c, prev_h=prev_h, use_bias=self.__use_bias)
                 # initialize input as star=t vector
                 inputs = self.start_vector
                 return (layer_id+1, inputs, prev_c, prev_h, anchors, anchors_w1, arc_seq, entropy, log_prob)
@@ -278,7 +286,10 @@ class Controller():
             next_c, next_h = rnn_layer(inputs, prev_c, prev_h, self.w_recurrent)
             next_c, next_h = prev_c, prev_h
         
-            logits = tf.matmul(next_h[-1], self.w_soft)
+            #logits = tf.matmul(next_h[-1], self.w_soft)
+            b_init = np.array([10.0, 10.0] + [0] * (self.num_branch - 2), dtype=np.float32)
+            logits = tf.layers.dense(inputs=next_h[-1], units=self.num_branch, use_bias=True, name='Softmax_weighted', 
+                                     bias_initializer=tf.constant_initializer(b_init) ,reuse=tf.AUTO_REUSE)
             
             # Softmax temperature (Softer Softmax)
             if self.temperature is not None : 
@@ -309,13 +320,10 @@ class Controller():
             
         return inputs, next_c, next_h, arc_seq, entropy, log_prob
         
-    def __create_trainer(self, child_model, lr_options, grad_options):
-        child_model.build_valid_rl()
+    def __create_trainer(self):
         
         # get model performances - Accuracy
-        self.valid_acc = (tf.to_float(child_model.valid_shuffle_acc) /
-                          tf.to_float(child_model.batch_size))
-        self.reward = self.valid_acc
+        self.reward = tf.placeholder(tf.float32, name='controller_reward')
         
         # multiply controller entropy as reward. you can apply entropy when weight is given.
         if self.entropy_weight is not None : 
@@ -330,7 +338,7 @@ class Controller():
         
         baseline_update = tf.assign_sub(self.baseline, update_policy)
         
-        with tf.contorl_dependencies([baseline_update]):
+        with tf.control_dependencies([baseline_update]):
             self.reward = tf.identity(self.reward)
             
         # final model loss
@@ -342,10 +350,11 @@ class Controller():
         self.train_op, self.lr, self.grad_norm, self.optimizer = set_optimizer(
             self.loss,
             vars_to_train,
+            self.train_step,
             lr_init=self.lr_init,
-            optim_algo=self.optim_algo,
-            lr_options=lr_options,
-            grad_options=grad_options,
+            optimizer_type=self.optimizer_type,
+            lr_options=self.lr_options,
+            grad_options=self.grad_options,
         )
         
         # Skip rate?
