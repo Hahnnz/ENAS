@@ -185,7 +185,7 @@ def set_optimizer(
             lr = lr_min + 0.5 * (lr_max - lr_min) * (1.0 + tf.cos(rate))
             return lr
             
-        learning_rate = tf.cond(tf.greater_equal(T_curr, T_i), _update, _no_update)
+        learning_rate = tf.cond(tf.greater_equal(T_curr, T_i), __do_update, __no_update)
         
     else:
         learning_rate = tf.train.exponential_decay(
