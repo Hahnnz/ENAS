@@ -49,9 +49,12 @@ class Child:
                  opt_algo='adam',
                  fixed_arc=None,
                  batch_size=None,
+                 real_batch_size=None,
                  num_stem_out=2,
                  num_cells=5,
                  num_layers=6,
+                 use_aux_heads=False,
+                 num_train_examples=None,
                  reuse=False,
                  phase='train',
                  model_name='Child'):
@@ -75,6 +78,7 @@ class Child:
         self.__num_stem_out = num_stem_out # How many outputs that you want to create at Stage1.
         self.__input_shape = input_shape
         self.num_layers = num_layers # number of layers to search
+        self.use_aux_heads = use_aux_heads
         self.out_fsize = out_fsize
         self.num_cells = num_cells
         self.num_classes = num_classes
@@ -83,6 +87,8 @@ class Child:
         
         self.lr_options = lr_options
         self.grad_options = grad_options
+        
+        self.__num_train_batches = (num_train_examples + real_batch_size - 1) // real_batch_size
         
         '''
         # Child model placeholders
@@ -118,6 +124,11 @@ class Child:
             log_probs = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.logits, labels=self.targets)
             self.loss = tf.reduce_mean(log_probs)
             
+            if self.use_aux_heads:
+                log_probs = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.aux_logits, labels=self.targets)
+                self.aux_loss = tf.reduce_mean(log_probs)
+                self.loss = self.loss +0.4*self.aux_loss
+            
             '''
             self.train_preds = tf.argmax(self.logits, axis=-1)
             self.train_preds = tf.to_int32(self.train_preds)
@@ -137,6 +148,7 @@ class Child:
                 optimizer_type=self.optimizer_type,
                 lr_options=self.lr_options,
                 grad_options=self.grad_options,
+                num_train_batches=self.__num_train_batches
             )
     
     def __model(self,reuse=False):
@@ -157,6 +169,9 @@ class Child:
         
         pool_distance = self.num_layers // 3
         self.pool_layers = [pool_distance, 2 * pool_distance + 1]
+        
+        if self.use_aux_heads:
+            self.aux_head_indices = [self.pool_layers[-1] + 1]
 
         # Stage 2. create Micro Search Space
         out_fsize = self.out_fsize
@@ -190,12 +205,10 @@ class Child:
                                                   self.is_train)
                 print("Layer {0:>2d}: {1}".format(layer_id, tensor))
                 candidate_layers = [candidate_layers[-1], tensor]
-
-                ''' # Need Aux_head implimentation
-                self.num_aux_vars = 0
-                get_auxiliary = all([hasattr(self, 'use_aux_heads'), layer_id in self.aux_head_indices, is_training])
-
+                
+                get_auxiliary = all([hasattr(self, 'use_aux_heads'), layer_id in self.aux_head_indices])
                 if get_auxiliary :
+                    print('activate auxiliary heads')
                     with tf.variable_scope('aux_head'):
                         aux_logits = tf.nn.relu(tensor)
                         aux_logits = avg_pooling(aux_logits, ksize=5, ssize=3, mode=self.conv_mode, padding='VALID')
@@ -206,7 +219,18 @@ class Child:
                             aux_logits = tf.nn.relu(aux_logits)
 
                         with tf.variable_scope('avg_pool'):
-                '''
+                            aux_logits = conv(aux_logits, 1, 768, 1, 'SAME', False, self.conv_mode)
+                            aux_logits = batch_norm(aux_logits, self.is_train)
+                            aux_logits = tf.nn.relu(aux_logits)
+                            
+                        with tf.variable_scope('fully_connected'):
+                            aux_logits = global_avg_pooling(aux_logits, mode=self.conv_mode)
+                            aux_logits = dense(aux_logits, self.num_classes, name='logits', use_bias=False)
+                        self.aux_logits = aux_logits
+                            
+                    aux_head_variables = [ var for var in tf.trainable_variables() if (
+                        var.name.startswith(self.model_name) and "aux_head" in var.name)]
+
         tensor = tf.nn.relu(tensor)
         tensor = global_avg_pooling(tensor, mode=self.conv_mode)
         
